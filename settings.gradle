@@ -1,0 +1,4 @@
+include ':wear'
+rootProject.name='Counterpart'
+include ':phone'
+include ':common'

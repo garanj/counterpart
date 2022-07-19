@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:keep="@array/android_wear_capabilities">
+    <string-array name="android_wear_capabilities">
+        <!-- Specifying this unique value allows nodes with the Wear Counterpart app installed to be
+             identified on the network -->
+        <item>counterpart_wear_capability</item>
+    </string-array>
+</resources>

@@ -5,17 +5,21 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Binder
 import android.os.IBinder
 import android.util.Log
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
+import androidx.concurrent.futures.await
 import androidx.core.app.NotificationCompat
+import androidx.health.services.client.HealthServices
+import androidx.health.services.client.MeasureCallback
+import androidx.health.services.client.MeasureClient
+import androidx.health.services.client.data.Availability
+import androidx.health.services.client.data.DataPoint
+import androidx.health.services.client.data.DataType
+import androidx.health.services.client.data.DataTypeAvailability
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import androidx.wear.ongoing.OngoingActivity
@@ -79,9 +83,8 @@ class WearCounterpartService : LifecycleService() {
     private lateinit var channelClient: ChannelClient
     private lateinit var messageClient: MessageClient
 
-    private val sensorManager by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
-    private val sensor by lazy { sensorManager.getDefaultSensor(Sensor.TYPE_HEART_RATE) }
-    private var listener: SensorEventListener? = null
+    private var measureCallback: MeasureCallback? = null
+    private lateinit var measureClient: MeasureClient
 
     private var messageSenderJob: Job? = null
     private var hrChannel: ChannelClient.Channel? = null
@@ -130,6 +133,7 @@ class WearCounterpartService : LifecycleService() {
         capabilityClient = Wearable.getCapabilityClient(this)
         channelClient = Wearable.getChannelClient(this)
         messageClient = Wearable.getMessageClient(this)
+        measureClient = HealthServices.getClient(this).measureClient
 
         lifecycleScope.launch {
             // If there is a phone on the node network with the app installed, start the periodic
@@ -188,7 +192,7 @@ class WearCounterpartService : LifecycleService() {
      * Starts or stops HR collection. This requires both the turning on or off of the sensor and the
      * initializing or tearing down of the [Channel] used to send data to the phone.
      */
-    fun startStopHr() {
+    suspend fun startStopHr() {
         if (isHrSensorOn.value) {
             teardownHeartRateSensor()
             tearDownHrChannel()
@@ -198,10 +202,10 @@ class WearCounterpartService : LifecycleService() {
         }
     }
 
-    private fun initializeHeartRateSensor() {
-        listener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent) {
-                val heartRate = event.values.last().toInt()
+    private suspend fun initializeHeartRateSensor() {
+        measureCallback = object : MeasureCallback {
+            override fun onData(data: List<DataPoint>) {
+                val heartRate = data.last().value.asDouble().toInt()
                 if (heartRate > 0) {
                     // Update the state value which is used locally on the watch in the UI.
                     hr.value = heartRate
@@ -213,12 +217,20 @@ class WearCounterpartService : LifecycleService() {
                 }
             }
 
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+            override fun onAvailabilityChanged(dataType: DataType, availability: Availability) {
+                when (availability) {
+                    DataTypeAvailability.UNKNOWN,
+                    DataTypeAvailability.ACQUIRING,
+                    DataTypeAvailability.UNAVAILABLE -> {
+                        hr.value = 0
+                    }
+                }
+            }
         }
 
-        listener?.let {
+        measureCallback?.let { callback ->
             Log.i(TAG, "Enabling HR sensor")
-            sensorManager.registerListener(listener, sensor, 1_000_000)
+            measureClient.registerCallback(DataType.HEART_RATE_BPM, callback).await()
         }
         // Once collection is enabled, the service is put into Foreground mode.
         isHrSensorOn.value = true
@@ -250,11 +262,11 @@ class WearCounterpartService : LifecycleService() {
         }
     }
 
-    private fun teardownHeartRateSensor() {
-        listener?.let {
-            sensorManager.unregisterListener(listener)
+    private suspend fun teardownHeartRateSensor() {
+        measureCallback?.let { callback ->
+            measureClient.unregisterCallback(DataType.HEART_RATE_BPM, callback).await()
         }
-        listener = null
+        measureCallback = null
         isHrSensorOn.value = false
         hr.value = 0
         // When the HR sensor is disabled, the service is taken out of foreground mode as the app no

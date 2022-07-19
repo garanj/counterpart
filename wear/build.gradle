@@ -89,4 +89,7 @@ dependencies {
     implementation "androidx.health:health-services-client:1.0.0-alpha03"
     implementation "com.google.guava:guava:31.1-android"
     implementation "androidx.concurrent:concurrent-futures-ktx:1.1.0"
+
+    // For Task coroutine support
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.6.4"
 }

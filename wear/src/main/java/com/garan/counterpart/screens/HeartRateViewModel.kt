@@ -10,13 +10,11 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
 import com.garan.counterpart.TAG
 import com.garan.counterpart.WearCounterpartService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 
@@ -33,9 +31,7 @@ class HeartRateViewModel @Inject constructor(
     var bound = mutableStateOf(false)
 
     fun startStopHr() {
-        viewModelScope.launch {
-            counterpartService?.startStopHr()
-        }
+        counterpartService?.startStopHr()
     }
 
     private val connection = object : ServiceConnection {
@@ -69,7 +65,7 @@ class HeartRateViewModel @Inject constructor(
 
     private fun createService() {
         Intent(applicationContext, WearCounterpartService::class.java).also { intent ->
-            applicationContext.startService(intent)
+            applicationContext.startForegroundService(intent)
             applicationContext.bindService(intent, connection, Context.BIND_AUTO_CREATE)
         }
     }

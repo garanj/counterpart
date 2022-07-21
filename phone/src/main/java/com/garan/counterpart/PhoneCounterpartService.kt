@@ -14,11 +14,6 @@ import com.garan.counterpart.common.Channels
 import com.garan.counterpart.common.KEEP_ALIVE_DELAY_MS
 import com.garan.counterpart.common.MessagePaths
 import com.garan.counterpart.common.MessageValues
-import com.garan.counterpart.common.addCapabilityListener
-import com.garan.counterpart.common.addMessageListener
-import com.garan.counterpart.common.getInputStream
-import com.garan.counterpart.common.registerChannelCallback
-import com.garan.counterpart.common.sendMessage
 import com.google.android.gms.wearable.CapabilityClient
 import com.google.android.gms.wearable.CapabilityInfo
 import com.google.android.gms.wearable.ChannelClient
@@ -32,6 +27,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import java.io.InputStream
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
@@ -71,7 +67,7 @@ class PhoneCounterpartService : LifecycleService() {
     // The ID of the connected Wear device, if there is one, or null
     var connectedHeartRateSensorNodeId: String? = null
 
-    private val messageListener = object: MessageClient.OnMessageReceivedListener {
+    private val messageListener = object : MessageClient.OnMessageReceivedListener {
         override fun onMessageReceived(messageEvent: MessageEvent) {
             when (messageEvent.path) {
                 MessagePaths.wearStatus -> {
@@ -92,7 +88,7 @@ class PhoneCounterpartService : LifecycleService() {
     // Listens for changes on the node network for any devices running the Wear app. In this simple
     // example, this phone app simply takes the first Wear app device on the network that is running
     // the wear app, and does not deal with the scenario where there may be more than one.
-    private val capabilityChangedListener = object: CapabilityClient.OnCapabilityChangedListener {
+    private val capabilityChangedListener = object : CapabilityClient.OnCapabilityChangedListener {
         override fun onCapabilityChanged(capabilityInfo: CapabilityInfo) {
             connectedHeartRateSensorNodeId = capabilityInfo.nodes.firstOrNull()?.id
             lifecycleScope.launch {
@@ -109,7 +105,7 @@ class PhoneCounterpartService : LifecycleService() {
             Log.i(TAG, "Channel opened! ${channel.path}")
             if (channel.path == Channels.hrChannel) {
                 lifecycleScope.launch(Dispatchers.IO) {
-                    hrInputStream = getInputStream(channelClient, channel)
+                    hrInputStream = channelClient.getInputStream(channel).await()
                     var isEnded = false
                     while (hrInputStream != null && !isEnded) {
                         if ((hrInputStream?.available() ?: 0) > 0) {
@@ -148,19 +144,19 @@ class PhoneCounterpartService : LifecycleService() {
         channelClient = Wearable.getChannelClient(this)
         messageClient = Wearable.getMessageClient(this)
         lifecycleScope.launch {
-            addCapabilityListener(
-                capabilityClient = capabilityClient,
-                listener = capabilityChangedListener,
-                capabilityUri =capabilityUri,
-                filterType = CapabilityClient.FILTER_REACHABLE)
+            capabilityClient.addListener(
+                capabilityChangedListener,
+                capabilityUri,
+                CapabilityClient.FILTER_REACHABLE
+            ).await()
         }
 
         lifecycleScope.launch {
-            addMessageListener(messageClient, messageListener)
+            messageClient.addListener(messageListener).await()
         }
 
         lifecycleScope.launch {
-            registerChannelCallback(channelClient, channelCallback)
+            channelClient.registerChannelCallback(channelCallback).await()
         }
 
         // Look for any supported Wear nodes on initial start up.
@@ -173,7 +169,8 @@ class PhoneCounterpartService : LifecycleService() {
     fun startRemoteApp() {
         connectedHeartRateSensorNodeId?.let { nodeId ->
             lifecycleScope.launch(Dispatchers.IO) {
-                sendMessage(messageClient, nodeId, MessagePaths.launchRemoteApp, "".toByteArray())
+                messageClient.sendMessage(nodeId, MessagePaths.launchRemoteApp, "".toByteArray())
+                    .await()
             }
         }
     }

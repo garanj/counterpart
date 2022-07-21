@@ -5,21 +5,18 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Binder
 import android.os.IBinder
 import android.util.Log
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
-import androidx.concurrent.futures.await
 import androidx.core.app.NotificationCompat
-import androidx.health.services.client.HealthServices
-import androidx.health.services.client.MeasureCallback
-import androidx.health.services.client.MeasureClient
-import androidx.health.services.client.data.Availability
-import androidx.health.services.client.data.DataPoint
-import androidx.health.services.client.data.DataType
-import androidx.health.services.client.data.DataTypeAvailability
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import androidx.wear.ongoing.OngoingActivity
@@ -29,12 +26,6 @@ import com.garan.counterpart.common.Channels
 import com.garan.counterpart.common.KEEP_ALIVE_DELAY_MS
 import com.garan.counterpart.common.MessagePaths
 import com.garan.counterpart.common.MessageValues
-import com.garan.counterpart.common.addCapabilityListener
-import com.garan.counterpart.common.closeChannel
-import com.garan.counterpart.common.getOutputStream
-import com.garan.counterpart.common.openChannel
-import com.garan.counterpart.common.registerChannelCallback
-import com.garan.counterpart.common.sendMessage
 import com.google.android.gms.wearable.CapabilityClient
 import com.google.android.gms.wearable.CapabilityInfo
 import com.google.android.gms.wearable.ChannelClient
@@ -46,9 +37,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import java.io.OutputStream
-import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
 
 /**
  * This service forms the guts of the mechanism for:
@@ -83,8 +73,9 @@ class WearCounterpartService : LifecycleService() {
     private lateinit var channelClient: ChannelClient
     private lateinit var messageClient: MessageClient
 
-    private var measureCallback: MeasureCallback? = null
-    private lateinit var measureClient: MeasureClient
+    private val sensorManager by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
+    private val sensor by lazy { sensorManager.getDefaultSensor(Sensor.TYPE_HEART_RATE) }
+    private var listener: SensorEventListener? = null
 
     private var messageSenderJob: Job? = null
     private var hrChannel: ChannelClient.Channel? = null
@@ -133,7 +124,6 @@ class WearCounterpartService : LifecycleService() {
         capabilityClient = Wearable.getCapabilityClient(this)
         channelClient = Wearable.getChannelClient(this)
         messageClient = Wearable.getMessageClient(this)
-        measureClient = HealthServices.getClient(this).measureClient
 
         lifecycleScope.launch {
             // If there is a phone on the node network with the app installed, start the periodic
@@ -152,19 +142,15 @@ class WearCounterpartService : LifecycleService() {
         }
 
         lifecycleScope.launch {
-            addCapabilityListener(
-                capabilityClient,
+            capabilityClient.addListener(
                 capabilityChangedListener,
                 capabilityUri,
                 CapabilityClient.FILTER_REACHABLE
-            )
+            ).await()
         }
 
         lifecycleScope.launch {
-            registerChannelCallback(
-                channelClient = channelClient,
-                channelCallback = channelCallback
-            )
+            channelClient.registerChannelCallback(channelCallback).await()
         }
         // This service implements [OnCapabilityChangedListener], so any change on the node network
         // e.g. a phone being turned on with the app installed, or a phone installing the app will
@@ -183,16 +169,19 @@ class WearCounterpartService : LifecycleService() {
 
         if (!started) {
             started = true
+            // For now, start this service always as a foreground service, as starting via
+            // startService then bringing to the foreground currently doesn't seem to work as well.
+            enableForegroundService()
         }
         Log.i(TAG, "service onStartCommand")
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     /**
      * Starts or stops HR collection. This requires both the turning on or off of the sensor and the
      * initializing or tearing down of the [Channel] used to send data to the phone.
      */
-    suspend fun startStopHr() {
+    fun startStopHr() {
         if (isHrSensorOn.value) {
             teardownHeartRateSensor()
             tearDownHrChannel()
@@ -202,10 +191,10 @@ class WearCounterpartService : LifecycleService() {
         }
     }
 
-    private suspend fun initializeHeartRateSensor() {
-        measureCallback = object : MeasureCallback {
-            override fun onData(data: List<DataPoint>) {
-                val heartRate = data.last().value.asDouble().toInt()
+    private fun initializeHeartRateSensor() {
+        listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {
+                val heartRate = event.values.last().toInt()
                 if (heartRate > 0) {
                     // Update the state value which is used locally on the watch in the UI.
                     hr.value = heartRate
@@ -217,24 +206,15 @@ class WearCounterpartService : LifecycleService() {
                 }
             }
 
-            override fun onAvailabilityChanged(dataType: DataType, availability: Availability) {
-                when (availability) {
-                    DataTypeAvailability.UNKNOWN,
-                    DataTypeAvailability.ACQUIRING,
-                    DataTypeAvailability.UNAVAILABLE -> {
-                        hr.value = 0
-                    }
-                }
-            }
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
 
-        measureCallback?.let { callback ->
+        listener?.let {
             Log.i(TAG, "Enabling HR sensor")
-            measureClient.registerCallback(DataType.HEART_RATE_BPM, callback).await()
+            sensorManager.registerListener(listener, sensor, 1_000_000)
         }
         // Once collection is enabled, the service is put into Foreground mode.
         isHrSensorOn.value = true
-        enableForegroundService()
     }
 
     /**
@@ -243,9 +223,9 @@ class WearCounterpartService : LifecycleService() {
     private fun initializeHrChannel() {
         capablePhoneNodeId.value?.let { nodeId ->
             lifecycleScope.launch(Dispatchers.IO) {
-                hrChannel = openChannel(channelClient, nodeId, Channels.hrChannel)
+                hrChannel = channelClient.openChannel(nodeId, Channels.hrChannel).await()
                 hrChannel?.let { channel ->
-                    hrOutputStream = getOutputStream(channelClient, channel)
+                    hrOutputStream = channelClient.getOutputStream(channel).await()
                     Log.i(TAG, "Set up channel to node: $nodeId")
                 }
             }
@@ -255,23 +235,22 @@ class WearCounterpartService : LifecycleService() {
     private fun tearDownHrChannel() {
         hrChannel?.let { channel ->
             lifecycleScope.launch {
-                closeChannel(channelClient, channel)
+                channelClient.close(channel).await()
                 hrChannel = null
                 hrOutputStream = null
             }
         }
     }
 
-    private suspend fun teardownHeartRateSensor() {
-        measureCallback?.let { callback ->
-            measureClient.unregisterCallback(DataType.HEART_RATE_BPM, callback).await()
+    private fun teardownHeartRateSensor() {
+        listener?.let {
+            sensorManager.unregisterListener(listener)
         }
-        measureCallback = null
+        listener = null
         isHrSensorOn.value = false
         hr.value = 0
         // When the HR sensor is disabled, the service is taken out of foreground mode as the app no
         // longer needs to keep running when not being used interactively.
-        disableForeground()
     }
 
     /**
@@ -288,12 +267,11 @@ class WearCounterpartService : LifecycleService() {
                 while (true) {
                     capablePhoneNodeId.value?.let { nodeId ->
                         Log.i(TAG, "Sending alive message")
-                        sendMessage(
-                            messageClient,
+                        messageClient.sendMessage(
                             nodeId,
                             MessagePaths.wearStatus,
                             MessageValues.alive.toByteArray()
-                        )
+                        ).await()
                     }
                     delay(KEEP_ALIVE_DELAY_MS)
                 }
@@ -306,12 +284,12 @@ class WearCounterpartService : LifecycleService() {
      */
     private suspend fun sendInactiveMessage() {
         capablePhoneNodeId.value?.let { nodeId ->
-            sendMessage(
-                messageClient,
+            messageClient.sendMessage(
                 nodeId,
                 MessagePaths.wearStatus,
                 MessageValues.inactive.toByteArray()
-            )
+            ).await()
+            return@let
         }
     }
 
@@ -337,14 +315,12 @@ class WearCounterpartService : LifecycleService() {
      * Checks for a phone with the app installed. If one is found, the ID is returned as a string
      * otherwise null.
      */
-    private suspend fun checkForPoweredOnInstalledNode() =
-        suspendCoroutine<String?> { continuation ->
-            Wearable.getCapabilityClient(this)
-                .getCapability(Capabilities.phone, CapabilityClient.FILTER_REACHABLE)
-                .addOnCompleteListener { task ->
-                    continuation.resume(task.result?.nodes?.firstOrNull()?.id)
-                }
-        }
+    private suspend fun checkForPoweredOnInstalledNode(): String? {
+        val capabilityInfo = Wearable.getCapabilityClient(this)
+            .getCapability(Capabilities.phone, CapabilityClient.FILTER_REACHABLE)
+            .await()
+        return capabilityInfo.nodes.firstOrNull()?.id
+    }
 
     override fun onBind(intent: Intent): IBinder {
         super.onBind(intent)
@@ -369,6 +345,7 @@ class WearCounterpartService : LifecycleService() {
         if (!isHrSensorOn.value) {
             // Stop sending alive messages
             disableSender()
+            disableForeground()
             // Send message to phone to signal Wear app stopping
             lifecycleScope.launch(Dispatchers.IO) {
                 sendInactiveMessage()
@@ -382,7 +359,7 @@ class WearCounterpartService : LifecycleService() {
     private fun enableForegroundService() {
         if (!foreground) {
             createNotificationChannel()
-            startForeground(1, buildNotification())
+            startForeground(1, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST)
             foreground = true
         }
     }

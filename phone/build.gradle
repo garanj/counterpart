@@ -66,4 +66,7 @@ dependencies {
 
     // Required for the service
     implementation "androidx.lifecycle:lifecycle-service:2.5.0"
+
+    // For Task coroutine support
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.6.4"
 }

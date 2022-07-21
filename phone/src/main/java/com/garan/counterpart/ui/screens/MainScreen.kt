@@ -20,7 +20,7 @@ fun MainScreen(
     when (serviceState) {
         is ServiceState.Connected -> {
             val heartRateSensorStatus by serviceState.installedStatus.collectAsState()
-            val appActiveStatus by serviceState.appActive
+            val appActiveStatus by serviceState.appActive.collectAsState()
             val hr by serviceState.hr
             ServiceConnectedScreen(
                 appActiveStatus = appActiveStatus,

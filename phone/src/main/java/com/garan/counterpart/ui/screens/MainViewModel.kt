@@ -80,7 +80,7 @@ sealed class ServiceState {
     // or inactive etc.
     data class Connected(
         val installedStatus: StateFlow<WearAppInstalledStatus>,
-        val appActive: State<Boolean>,
+        val appActive: StateFlow<Boolean>,
         val hr: State<Int>
     ) : ServiceState()
 }

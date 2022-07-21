@@ -58,10 +58,14 @@
                     android:path="/counterpart_app_launch"
                     android:scheme="wear" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data
+                    android:host="*"
+                    android:path="/ping"
+                    android:scheme="wear" />
+            </intent-filter>
         </service>
 
     </application>
-    <queries>
-        <package android:name="com.google.android.wearable.healthservices" />
-    </queries>
 </manifest>

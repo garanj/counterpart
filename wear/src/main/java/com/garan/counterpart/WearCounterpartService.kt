@@ -23,9 +23,6 @@ import androidx.wear.ongoing.OngoingActivity
 import androidx.wear.ongoing.Status
 import com.garan.counterpart.common.Capabilities
 import com.garan.counterpart.common.Channels
-import com.garan.counterpart.common.KEEP_ALIVE_DELAY_MS
-import com.garan.counterpart.common.MessagePaths
-import com.garan.counterpart.common.MessageValues
 import com.google.android.gms.wearable.CapabilityClient
 import com.google.android.gms.wearable.CapabilityInfo
 import com.google.android.gms.wearable.ChannelClient
@@ -33,8 +30,6 @@ import com.google.android.gms.wearable.MessageClient
 import com.google.android.gms.wearable.Wearable
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -77,7 +72,6 @@ class WearCounterpartService : LifecycleService() {
     private val sensor by lazy { sensorManager.getDefaultSensor(Sensor.TYPE_HEART_RATE) }
     private var listener: SensorEventListener? = null
 
-    private var messageSenderJob: Job? = null
     private var hrChannel: ChannelClient.Channel? = null
     private var hrOutputStream: OutputStream? = null
 
@@ -126,17 +120,14 @@ class WearCounterpartService : LifecycleService() {
         messageClient = Wearable.getMessageClient(this)
 
         lifecycleScope.launch {
-            // If there is a phone on the node network with the app installed, start the periodic
-            // transmission to show the Wear app is awake. This could be done with a [Channel],
-            // which may be better. Also, this makes no attempt at the moment to determine whether
-            // the app on the phone is running or not.
+            // If there is a phone on the node network with the app installed, start the [Channel]
+            // which will be used for sending the HR values when sensor is on, but also allows the
+            // phone to know when the app is running on the Wear app.
             capablePhoneNodeId.collect { nodeId ->
                 if (nodeId != null) {
-                    Log.i(TAG, "Starting message sender")
-                    enableMessageSender()
+                    initializeHrChannel()
                 } else {
-                    Log.i(TAG, "Stopping message sender")
-                    disableSender()
+                    tearDownHrChannel()
                 }
             }
         }
@@ -178,16 +169,13 @@ class WearCounterpartService : LifecycleService() {
     }
 
     /**
-     * Starts or stops HR collection. This requires both the turning on or off of the sensor and the
-     * initializing or tearing down of the [Channel] used to send data to the phone.
+     * Starts or stops HR collection.
      */
     fun startStopHr() {
         if (isHrSensorOn.value) {
             teardownHeartRateSensor()
-            tearDownHrChannel()
         } else {
             initializeHeartRateSensor()
-            initializeHrChannel()
         }
     }
 
@@ -243,64 +231,13 @@ class WearCounterpartService : LifecycleService() {
     }
 
     private fun teardownHeartRateSensor() {
+        hrOutputStream?.write(0)
         listener?.let {
             sensorManager.unregisterListener(listener)
         }
         listener = null
         isHrSensorOn.value = false
         hr.value = 0
-        // When the HR sensor is disabled, the service is taken out of foreground mode as the app no
-        // longer needs to keep running when not being used interactively.
-    }
-
-    /**
-     * Sends a periodic message to the phone to let it know the app is still running - even if the
-     * HR sensor isn't started. The phone app can use this to know whether to offer the option to
-     * launch the Wear app remotely or not.
-     *
-     * This could be achieved using a [Channel] instead that is established when the app is launched
-     * which may be a better approach.
-     */
-    private fun enableMessageSender() {
-        if (messageSenderJob == null) {
-            messageSenderJob = lifecycleScope.launch(Dispatchers.IO) {
-                while (true) {
-                    capablePhoneNodeId.value?.let { nodeId ->
-                        Log.i(TAG, "Sending alive message")
-                        messageClient.sendMessage(
-                            nodeId,
-                            MessagePaths.wearStatus,
-                            MessageValues.alive.toByteArray()
-                        ).await()
-                    }
-                    delay(KEEP_ALIVE_DELAY_MS)
-                }
-            }
-        }
-    }
-
-    /**
-     * Lets the phone app know that the Wear app is shutting down.
-     */
-    private suspend fun sendInactiveMessage() {
-        capablePhoneNodeId.value?.let { nodeId ->
-            messageClient.sendMessage(
-                nodeId,
-                MessagePaths.wearStatus,
-                MessageValues.inactive.toByteArray()
-            ).await()
-            return@let
-        }
-    }
-
-    /**
-     * Stops the periodic alive messages being sent.
-     */
-    private fun disableSender() {
-        messageSenderJob?.let {
-            it.cancel()
-            messageSenderJob = null
-        }
     }
 
     /**
@@ -343,12 +280,9 @@ class WearCounterpartService : LifecycleService() {
 
     private fun maybeStopService() {
         if (!isHrSensorOn.value) {
-            // Stop sending alive messages
-            disableSender()
+            tearDownHrChannel()
             disableForeground()
-            // Send message to phone to signal Wear app stopping
             lifecycleScope.launch(Dispatchers.IO) {
-                sendInactiveMessage()
                 channelClient.unregisterChannelCallback(channelCallback)
                 capabilityClient.removeListener(capabilityChangedListener)
                 stopSelf()

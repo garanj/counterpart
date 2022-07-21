@@ -11,15 +11,12 @@ import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import com.garan.counterpart.common.Capabilities
 import com.garan.counterpart.common.Channels
-import com.garan.counterpart.common.KEEP_ALIVE_DELAY_MS
 import com.garan.counterpart.common.MessagePaths
-import com.garan.counterpart.common.MessageValues
 import com.google.android.gms.wearable.CapabilityClient
 import com.google.android.gms.wearable.CapabilityInfo
 import com.google.android.gms.wearable.ChannelClient
 import com.google.android.gms.wearable.ChannelIOException
 import com.google.android.gms.wearable.MessageClient
-import com.google.android.gms.wearable.MessageEvent
 import com.google.android.gms.wearable.Wearable
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
@@ -53,37 +50,22 @@ class PhoneCounterpartService : LifecycleService() {
     private lateinit var channelClient: ChannelClient
     private lateinit var messageClient: MessageClient
 
-    // Job used for confirming that Wear app is alive - Wear app sends periodic alive messages. An
-    // alternative approach, which may be better is for the Wear app to establish a [Channel] even
-    // when no HR is being collected, and the state of this channel could be used by the phone app
-    // to infer whether the Wear app is running or not.
-    private var keepAliveCheckJob: Job? = null
+    // Job for pinging the watch when it is on. At the moment, on Samsung devices, it appears that
+    // even ForegroundServices can be paused in some way by some battery-saving logic, which should
+    // not really happen when the sensor is tracking. To work around this at the moment, a message
+    // is delivered periodically from the phone which stops the ForegroundService from doing this.
+    // This is not the ideal situation and a better remedy to this situation is required.
+    private var pingJob: Job? = null
 
     val installedStatus: MutableStateFlow<WearAppInstalledStatus> =
         MutableStateFlow(WearAppInstalledStatus.NO_DEVICE_FOUND)
-    val appActiveStatus: MutableState<Boolean> = mutableStateOf(false)
+    val appActiveStatus: MutableStateFlow<Boolean> =
+        MutableStateFlow(false)
     val hr: MutableState<Int> = mutableStateOf(0)
 
     // The ID of the connected Wear device, if there is one, or null
     var connectedHeartRateSensorNodeId: String? = null
 
-    private val messageListener = object : MessageClient.OnMessageReceivedListener {
-        override fun onMessageReceived(messageEvent: MessageEvent) {
-            when (messageEvent.path) {
-                MessagePaths.wearStatus -> {
-                    if (messageEvent.data.contentEquals(MessageValues.alive.toByteArray())) {
-                        // In case this hasn't already been determined
-                        installedStatus.value = WearAppInstalledStatus.APP_INSTALLED
-                        appActiveStatus.value = true
-                        updateAliveCheck()
-                    } else if (messageEvent.data.contentEquals(MessageValues.inactive.toByteArray())) {
-                        // When the Wear app is shutting down, it will send an inactive message.
-                        appActiveStatus.value = false
-                    }
-                }
-            }
-        }
-    }
 
     // Listens for changes on the node network for any devices running the Wear app. In this simple
     // example, this phone app simply takes the first Wear app device on the network that is running
@@ -98,42 +80,48 @@ class PhoneCounterpartService : LifecycleService() {
     }
 
     private val channelCallback = object : ChannelClient.ChannelCallback() {
-        // The Wear app opens a channel when the sensor is turned on, and sends HR readings as plain
+        // The Wear app opens a channel when the apps is started, and sends HR readings as plain
         // Int values. The phone app reacts to the opening of the channel by setting up a loop to
         // read from the InputStream.
         override fun onChannelOpened(channel: ChannelClient.Channel) {
             Log.i(TAG, "Channel opened! ${channel.path}")
             if (channel.path == Channels.hrChannel) {
-                lifecycleScope.launch(Dispatchers.IO) {
-                    hrInputStream = channelClient.getInputStream(channel).await()
-                    var isEnded = false
-                    while (hrInputStream != null && !isEnded) {
-                        if ((hrInputStream?.available() ?: 0) > 0) {
-                            try {
-                                val readInt = hrInputStream?.read()
-                                readInt?.let {
-                                    if (it == -1) {
-                                        isEnded = true
-                                    } else {
-                                        hr.value = it
-                                    }
-                                }
-                            } catch (e: ChannelIOException) {
-                                Log.w(TAG, "Tried to read as channel may have been closing")
-                                isEnded = true
-                            }
-                        }
-                        delay(10)
-                    }
-                }
+                appActiveStatus.value = true
+                startChannelInputStream(channel)
             }
         }
 
         override fun onChannelClosed(channel: ChannelClient.Channel, p1: Int, p2: Int) {
             if (channel.path == Channels.hrChannel) {
+                appActiveStatus.value = false
                 hrInputJob?.cancel()
                 hrInputStream = null
                 hr.value = 0
+            }
+        }
+    }
+
+    private fun startChannelInputStream(channel: ChannelClient.Channel) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            hrInputStream = channelClient.getInputStream(channel).await()
+            var isEnded = false
+            while (hrInputStream != null && !isEnded) {
+                if ((hrInputStream?.available() ?: 0) > 0) {
+                    try {
+                        val readInt = hrInputStream?.read()
+                        readInt?.let {
+                            if (it == -1) {
+                                isEnded = true
+                            } else {
+                                hr.value = it
+                            }
+                        }
+                    } catch (e: ChannelIOException) {
+                        Log.w(TAG, "Tried to read as channel may have been closing")
+                        isEnded = true
+                    }
+                }
+                delay(10)
             }
         }
     }
@@ -152,16 +140,25 @@ class PhoneCounterpartService : LifecycleService() {
         }
 
         lifecycleScope.launch {
-            messageClient.addListener(messageListener).await()
-        }
-
-        lifecycleScope.launch {
             channelClient.registerChannelCallback(channelCallback).await()
         }
 
         // Look for any supported Wear nodes on initial start up.
         lifecycleScope.launch {
             queryForCapability()
+        }
+
+        lifecycleScope.launch {
+            Log.i(TAG, "Setting up ping")
+            appActiveStatus.collect { status ->
+                when (status) {
+                    false -> {
+                        pingJob?.cancel()
+                        pingJob = null
+                    }
+                    true -> startPingJob()
+                }
+            }
         }
         Log.i(TAG, "Service onCreate")
     }
@@ -175,14 +172,19 @@ class PhoneCounterpartService : LifecycleService() {
         }
     }
 
-    // This is run every time an alive check message is received by the phone. This cancels any
-    // existing job and creates a new one, such that, as long as alive messages keep being received
-    // within the KEEP_ALIVE_DELAY_MS * 2, then the app active status will never get set to false.
-    private fun updateAliveCheck() {
-        keepAliveCheckJob?.cancel()
-        keepAliveCheckJob = lifecycleScope.launch {
-            delay(KEEP_ALIVE_DELAY_MS * 2)
-            appActiveStatus.value = false
+    private fun startPingJob() {
+        pingJob = lifecycleScope.launch(Dispatchers.IO) {
+            while (true) {
+                Log.i(TAG, "Sending ping")
+                connectedHeartRateSensorNodeId?.let { nodeId ->
+                    messageClient.sendMessage(
+                        nodeId,
+                        MessagePaths.ping,
+                        "".toByteArray()
+                    ).await()
+                }
+                delay(5000)
+            }
         }
     }
 
@@ -250,7 +252,6 @@ class PhoneCounterpartService : LifecycleService() {
 
     private fun maybeStopService() {
         lifecycleScope.launch {
-            messageClient.removeListener(messageListener)
             capabilityClient.removeListener(capabilityChangedListener)
             channelClient.unregisterChannelCallback(channelCallback)
             stopSelf()

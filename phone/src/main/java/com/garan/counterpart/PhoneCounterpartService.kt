@@ -12,12 +12,7 @@ import androidx.lifecycle.lifecycleScope
 import com.garan.counterpart.common.Capabilities
 import com.garan.counterpart.common.Channels
 import com.garan.counterpart.common.MessagePaths
-import com.google.android.gms.wearable.CapabilityClient
-import com.google.android.gms.wearable.CapabilityInfo
-import com.google.android.gms.wearable.ChannelClient
-import com.google.android.gms.wearable.ChannelIOException
-import com.google.android.gms.wearable.MessageClient
-import com.google.android.gms.wearable.Wearable
+import com.google.android.gms.wearable.*
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -47,6 +42,7 @@ class PhoneCounterpartService : LifecycleService() {
     // Job used for reading data from the [Channel] [InputStream] when HR is being collected.
     private var hrInputJob: Job? = null
     private var hrInputStream: InputStream? = null
+    private var hrChannel: ChannelClient.Channel? = null
 
     // Job to invalidate the HR value if it is too old.
     private var heartRateTimeOut: Job? = null
@@ -62,7 +58,7 @@ class PhoneCounterpartService : LifecycleService() {
     val hr: MutableState<Int> = mutableStateOf(0)
 
     // The ID of the connected Wear device, if there is one, or null
-    var connectedHeartRateSensorNodeId: String? = null
+    var connectedHeartRateSensorNodeId: MutableStateFlow<String?> = MutableStateFlow(null)
 
 
     // Listens for changes on the node network for any devices running the Wear app. In this simple
@@ -70,7 +66,7 @@ class PhoneCounterpartService : LifecycleService() {
     // the wear app, and does not deal with the scenario where there may be more than one.
     private val capabilityChangedListener = object : CapabilityClient.OnCapabilityChangedListener {
         override fun onCapabilityChanged(capabilityInfo: CapabilityInfo) {
-            connectedHeartRateSensorNodeId = capabilityInfo.nodes.firstOrNull()?.id
+            connectedHeartRateSensorNodeId.value = capabilityInfo.nodes.firstOrNull()?.id
             lifecycleScope.launch {
                 installedStatus.value = checkNodeForInstall()
             }
@@ -82,7 +78,6 @@ class PhoneCounterpartService : LifecycleService() {
         // Int values. The phone app reacts to the opening of the channel by setting up a loop to
         // read from the InputStream.
         override fun onChannelOpened(channel: ChannelClient.Channel) {
-            Log.i(TAG, "Channel opened! ${channel.path}")
             if (channel.path == Channels.hrChannel) {
                 appActiveStatus.value = true
                 startChannelInputStream(channel)
@@ -120,6 +115,7 @@ class PhoneCounterpartService : LifecycleService() {
                                 isEnded = true
                             } else {
                                 hr.value = it
+                                appActiveStatus.value = true
                                 // Ensure that the timer is reset to invalidate the heart rate if
                                 // the value gets stale.
                                 updateHeartRateTimeOutCheck()
@@ -140,6 +136,19 @@ class PhoneCounterpartService : LifecycleService() {
         capabilityClient = Wearable.getCapabilityClient(this)
         channelClient = Wearable.getChannelClient(this)
         messageClient = Wearable.getMessageClient(this)
+
+        lifecycleScope.launch {
+            // If there is a watch on the node network with the app installed, start the [Channel]
+            // which will be used for receiving HR values.
+            connectedHeartRateSensorNodeId.collect { nodeId ->
+                if (nodeId != null) {
+                    initializeHrChannel()
+                } else {
+                    tearDownHrChannel()
+                }
+            }
+        }
+
         lifecycleScope.launch {
             capabilityClient.addListener(
                 capabilityChangedListener,
@@ -160,7 +169,7 @@ class PhoneCounterpartService : LifecycleService() {
     }
 
     fun startRemoteApp() {
-        connectedHeartRateSensorNodeId?.let { nodeId ->
+        connectedHeartRateSensorNodeId.value?.let { nodeId ->
             lifecycleScope.launch(Dispatchers.IO) {
                 messageClient.sendMessage(nodeId, MessagePaths.launchRemoteApp, "".toByteArray())
                     .await()
@@ -169,15 +178,41 @@ class PhoneCounterpartService : LifecycleService() {
     }
 
     private suspend fun queryForCapability() {
-        connectedHeartRateSensorNodeId = checkForPoweredOnInstalledNode()
+        connectedHeartRateSensorNodeId.value = checkForPoweredOnInstalledNode()
         installedStatus.value = checkNodeForInstall()
     }
 
-    private suspend fun checkNodeForInstall() = if (connectedHeartRateSensorNodeId == null) {
+    /**
+     * Sets up a channel to the watch, if a channel hasn't already been set up the other way.
+     */
+    private fun initializeHrChannel() {
+        if (hrChannel == null) {
+            connectedHeartRateSensorNodeId.value?.let { nodeId ->
+                lifecycleScope.launch(Dispatchers.IO) {
+                    hrChannel = channelClient.openChannel(nodeId, Channels.hrChannel).await()
+                    hrChannel?.let { channel ->
+                        startChannelInputStream(channel)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun tearDownHrChannel() {
+        hrChannel?.let { channel ->
+            lifecycleScope.launch {
+                channelClient.close(channel).await()
+                hrChannel = null
+                hrInputStream = null
+            }
+        }
+    }
+
+    private suspend fun checkNodeForInstall() = if (connectedHeartRateSensorNodeId.value == null) {
         // Check for whether a device exists without the app
         val firstNode = checkForPoweredOnNode()
         if (firstNode != null) {
-            connectedHeartRateSensorNodeId = firstNode
+            connectedHeartRateSensorNodeId.value = firstNode
             WearAppInstalledStatus.APP_NOT_INSTALLED
         } else {
             WearAppInstalledStatus.NO_DEVICE_FOUND

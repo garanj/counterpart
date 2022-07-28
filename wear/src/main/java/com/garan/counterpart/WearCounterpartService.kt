@@ -101,6 +101,20 @@ class WearCounterpartService : LifecycleService() {
                 }
             }
         }
+
+        override fun onOutputClosed(channel: ChannelClient.Channel, p1: Int, p2: Int) {
+            hrOutputStream = null
+        }
+
+        // When connection was established from the phone side
+        override fun onChannelOpened(channel: ChannelClient.Channel) {
+            lifecycleScope.launch {
+                hrChannel = channel
+                hrOutputStream = channelClient.getOutputStream(channel).await()
+                // Write an initial value to inform the other end that connection is established
+                hrOutputStream?.write(0)
+            }
+        }
     }
 
     private val capabilityChangedListener = object : CapabilityClient.OnCapabilityChangedListener {
@@ -205,15 +219,18 @@ class WearCounterpartService : LifecycleService() {
     }
 
     /**
-     * Creates a [Channel] in [OutputStream] mode for transmission of HR data to the phone.
+     * Creates a [Channel] in [OutputStream] mode for transmission of HR data to the phone, if a
+     * channel is not already established.
      */
     private fun initializeHrChannel() {
-        capablePhoneNodeId.value?.let { nodeId ->
-            lifecycleScope.launch(Dispatchers.IO) {
-                hrChannel = channelClient.openChannel(nodeId, Channels.hrChannel).await()
-                hrChannel?.let { channel ->
-                    hrOutputStream = channelClient.getOutputStream(channel).await()
-                    Log.i(TAG, "Set up channel to node: $nodeId")
+        if (hrChannel == null) {
+            capablePhoneNodeId.value?.let { nodeId ->
+                lifecycleScope.launch(Dispatchers.IO) {
+                    hrChannel = channelClient.openChannel(nodeId, Channels.hrChannel).await()
+                    hrChannel?.let { channel ->
+                        hrOutputStream = channelClient.getOutputStream(channel).await()
+                        Log.i(TAG, "Set up channel to node: $nodeId")
+                    }
                 }
             }
         }

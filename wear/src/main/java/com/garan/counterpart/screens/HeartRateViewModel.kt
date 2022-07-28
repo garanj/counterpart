@@ -65,7 +65,7 @@ class HeartRateViewModel @Inject constructor(
 
     private fun createService() {
         Intent(applicationContext, WearCounterpartService::class.java).also { intent ->
-            applicationContext.startForegroundService(intent)
+            applicationContext.startService(intent)
             applicationContext.bindService(intent, connection, Context.BIND_AUTO_CREATE)
         }
     }

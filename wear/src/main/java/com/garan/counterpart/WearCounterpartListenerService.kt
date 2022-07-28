@@ -10,11 +10,7 @@ import com.google.android.gms.wearable.WearableListenerService
  */
 class WearCounterpartListenerService : WearableListenerService() {
     override fun onMessageReceived(messageEvent: MessageEvent) {
-        if (messageEvent.path == MessagePaths.ping) {
-            Intent(applicationContext, WearCounterpartService::class.java).also { intent ->
-                applicationContext.startForegroundService(intent)
-            }
-        } else if (messageEvent.path == MessagePaths.launchRemoteApp) {
+        if (messageEvent.path == MessagePaths.launchRemoteApp) {
             val intent = Intent(this, WearCounterpartActivity::class.java)
             intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
             startActivity(intent)

@@ -160,9 +160,6 @@ class WearCounterpartService : LifecycleService() {
 
         if (!started) {
             started = true
-            // For now, start this service always as a foreground service, as starting via
-            // startService then bringing to the foreground currently doesn't seem to work as well.
-            enableForegroundService()
         }
         Log.i(TAG, "service onStartCommand")
         return START_STICKY
@@ -173,8 +170,10 @@ class WearCounterpartService : LifecycleService() {
      */
     fun startStopHr() {
         if (isHrSensorOn.value) {
+            disableForeground()
             teardownHeartRateSensor()
         } else {
+            enableForegroundService()
             initializeHeartRateSensor()
         }
     }
@@ -183,14 +182,14 @@ class WearCounterpartService : LifecycleService() {
         listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
                 val heartRate = event.values.last().toInt()
-                if (heartRate > 0) {
-                    // Update the state value which is used locally on the watch in the UI.
-                    hr.value = heartRate
+                if (heartRate != hr.value) {
                     // Write the value to the [Channel] for transmission to the phone. In this
                     // basic example, HR is written to the [Channel] as a simple [Int] value which
                     // is read on the other side. It might be better to send some kind of structure
                     // like using protobuf.
                     hrOutputStream?.write(heartRate)
+                    // Update the state value which is used locally on the watch in the UI.
+                    hr.value = heartRate
                 }
             }
 

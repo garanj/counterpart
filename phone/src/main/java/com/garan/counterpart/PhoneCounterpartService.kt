@@ -37,6 +37,8 @@ import kotlin.coroutines.suspendCoroutine
 class PhoneCounterpartService : LifecycleService() {
     private val binder = LocalBinder()
 
+    private val HEART_RATE_TTL_MS = 10000L
+
     // The capability that the phone app declares on the network of nodes.
     private val capabilityUri = Uri.parse("wear://*/${Capabilities.wear}")
 
@@ -46,16 +48,12 @@ class PhoneCounterpartService : LifecycleService() {
     private var hrInputJob: Job? = null
     private var hrInputStream: InputStream? = null
 
+    // Job to invalidate the HR value if it is too old.
+    private var heartRateTimeOut: Job? = null
+
     private lateinit var capabilityClient: CapabilityClient
     private lateinit var channelClient: ChannelClient
     private lateinit var messageClient: MessageClient
-
-    // Job for pinging the watch when it is on. At the moment, on Samsung devices, it appears that
-    // even ForegroundServices can be paused in some way by some battery-saving logic, which should
-    // not really happen when the sensor is tracking. To work around this at the moment, a message
-    // is delivered periodically from the phone which stops the ForegroundService from doing this.
-    // This is not the ideal situation and a better remedy to this situation is required.
-    private var pingJob: Job? = null
 
     val installedStatus: MutableStateFlow<WearAppInstalledStatus> =
         MutableStateFlow(WearAppInstalledStatus.NO_DEVICE_FOUND)
@@ -101,6 +99,14 @@ class PhoneCounterpartService : LifecycleService() {
         }
     }
 
+    private fun updateHeartRateTimeOutCheck() {
+        heartRateTimeOut?.cancel()
+        heartRateTimeOut = lifecycleScope.launch {
+            delay(HEART_RATE_TTL_MS)
+            hr.value = 0
+        }
+    }
+
     private fun startChannelInputStream(channel: ChannelClient.Channel) {
         lifecycleScope.launch(Dispatchers.IO) {
             hrInputStream = channelClient.getInputStream(channel).await()
@@ -114,6 +120,9 @@ class PhoneCounterpartService : LifecycleService() {
                                 isEnded = true
                             } else {
                                 hr.value = it
+                                // Ensure that the timer is reset to invalidate the heart rate if
+                                // the value gets stale.
+                                updateHeartRateTimeOutCheck()
                             }
                         }
                     } catch (e: ChannelIOException) {
@@ -147,19 +156,6 @@ class PhoneCounterpartService : LifecycleService() {
         lifecycleScope.launch {
             queryForCapability()
         }
-
-        lifecycleScope.launch {
-            Log.i(TAG, "Setting up ping")
-            appActiveStatus.collect { status ->
-                when (status) {
-                    false -> {
-                        pingJob?.cancel()
-                        pingJob = null
-                    }
-                    true -> startPingJob()
-                }
-            }
-        }
         Log.i(TAG, "Service onCreate")
     }
 
@@ -168,22 +164,6 @@ class PhoneCounterpartService : LifecycleService() {
             lifecycleScope.launch(Dispatchers.IO) {
                 messageClient.sendMessage(nodeId, MessagePaths.launchRemoteApp, "".toByteArray())
                     .await()
-            }
-        }
-    }
-
-    private fun startPingJob() {
-        pingJob = lifecycleScope.launch(Dispatchers.IO) {
-            while (true) {
-                Log.i(TAG, "Sending ping")
-                connectedHeartRateSensorNodeId?.let { nodeId ->
-                    messageClient.sendMessage(
-                        nodeId,
-                        MessagePaths.ping,
-                        "".toByteArray()
-                    ).await()
-                }
-                delay(5000)
             }
         }
     }

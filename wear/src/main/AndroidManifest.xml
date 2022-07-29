@@ -59,6 +59,8 @@
                     android:scheme="wear" />
             </intent-filter>
         </service>
-
     </application>
+    <queries>
+        <package android:name="com.google.android.wearable.healthservices" />
+    </queries>
 </manifest>

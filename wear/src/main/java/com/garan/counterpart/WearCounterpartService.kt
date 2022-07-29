@@ -1,18 +1,13 @@
 package com.garan.counterpart
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
+import android.app.*
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Binder
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
@@ -23,17 +18,15 @@ import androidx.wear.ongoing.OngoingActivity
 import androidx.wear.ongoing.Status
 import com.garan.counterpart.common.Capabilities
 import com.garan.counterpart.common.Channels
-import com.google.android.gms.wearable.CapabilityClient
-import com.google.android.gms.wearable.CapabilityInfo
-import com.google.android.gms.wearable.ChannelClient
-import com.google.android.gms.wearable.MessageClient
-import com.google.android.gms.wearable.Wearable
+import com.garan.counterpart.hrm.HeartRateSensor
+import com.google.android.gms.wearable.*
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import java.io.OutputStream
+import javax.inject.Inject
 
 /**
  * This service forms the guts of the mechanism for:
@@ -53,6 +46,9 @@ import java.io.OutputStream
  */
 @AndroidEntryPoint
 class WearCounterpartService : LifecycleService() {
+    @Inject
+    lateinit var heartRateSensor: HeartRateSensor
+
     private val binder = LocalBinder()
 
     // ChannelClient does not appear to define this constant for the reason code for a timeout.
@@ -68,10 +64,6 @@ class WearCounterpartService : LifecycleService() {
     private lateinit var channelClient: ChannelClient
     private lateinit var messageClient: MessageClient
 
-    private val sensorManager by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
-    private val sensor by lazy { sensorManager.getDefaultSensor(Sensor.TYPE_HEART_RATE) }
-    private var listener: SensorEventListener? = null
-
     private var hrChannel: ChannelClient.Channel? = null
     private var hrOutputStream: OutputStream? = null
 
@@ -79,6 +71,26 @@ class WearCounterpartService : LifecycleService() {
 
     val hr: MutableState<Int> = mutableStateOf(0)
     val isHrSensorOn: MutableState<Boolean> = mutableStateOf(false)
+
+    // Use an alarm to wake up the app and flush the sensor, typically at the 5s interval
+    private val ALARM_INTERVAL_MS = 5000L
+    private val alarmManager by lazy { getSystemService(ALARM_SERVICE) as AlarmManager }
+    private val alarmListener = object: AlarmManager.OnAlarmListener {
+        override fun onAlarm() {
+            Log.i(TAG, "RTC wakeup alarm")
+            heartRateSensor.flush()
+            Log.i(TAG, "Sending: ${heartRateSensor.latestValue}")
+            // Write the value to the [Channel] for transmission to the phone. In this
+            // basic example, HR is written to the [Channel] as a simple [Int] value which
+            // is read on the other side. It might be better to send some kind of structure
+            // like using protobuf.
+            hrOutputStream?.write(heartRateSensor.latestValue)
+            // Update the state value which is used locally on the watch in the UI.
+            hr.value = heartRateSensor.latestValue
+            setNextAlarm()
+        }
+    }
+    private val handler = Handler(Looper.getMainLooper())
 
     // Callback for when channels are opened or closed.
     private val channelCallback = object : ChannelClient.ChannelCallback() {
@@ -172,34 +184,32 @@ class WearCounterpartService : LifecycleService() {
         if (isHrSensorOn.value) {
             disableForeground()
             teardownHeartRateSensor()
+            cancelAlarm()
         } else {
             enableForegroundService()
             initializeHeartRateSensor()
+            setNextAlarm()
         }
     }
 
+    private fun setNextAlarm() {
+        val now = System.currentTimeMillis()
+        alarmManager.setExact(
+            AlarmManager.RTC_WAKEUP,
+            now + ALARM_INTERVAL_MS,
+            "counterpart_alarm",
+            alarmListener,
+            handler
+        )
+    }
+
+    private fun cancelAlarm() {
+        alarmManager.cancel(alarmListener)
+    }
+
     private fun initializeHeartRateSensor() {
-        listener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent) {
-                val heartRate = event.values.last().toInt()
-                if (heartRate != hr.value) {
-                    // Write the value to the [Channel] for transmission to the phone. In this
-                    // basic example, HR is written to the [Channel] as a simple [Int] value which
-                    // is read on the other side. It might be better to send some kind of structure
-                    // like using protobuf.
-                    hrOutputStream?.write(heartRate)
-                    // Update the state value which is used locally on the watch in the UI.
-                    hr.value = heartRate
-                }
-            }
+        heartRateSensor.start()
 
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-        }
-
-        listener?.let {
-            Log.i(TAG, "Enabling HR sensor")
-            sensorManager.registerListener(listener, sensor, 1_000_000)
-        }
         // Once collection is enabled, the service is put into Foreground mode.
         isHrSensorOn.value = true
     }
@@ -231,10 +241,7 @@ class WearCounterpartService : LifecycleService() {
 
     private fun teardownHeartRateSensor() {
         hrOutputStream?.write(0)
-        listener?.let {
-            sensorManager.unregisterListener(listener)
-        }
-        listener = null
+        heartRateSensor.stop()
         isHrSensorOn.value = false
         hr.value = 0
     }

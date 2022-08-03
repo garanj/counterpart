@@ -20,7 +20,7 @@ import javax.inject.Singleton
  * Counterpart can use either Health Services for measuring heart rate or SensorManager. Specify
  * which one should be injected.
  */
-const val useHealthServices = false
+const val useHealthServices = true
 
 @Module
 @InstallIn(SingletonComponent::class)

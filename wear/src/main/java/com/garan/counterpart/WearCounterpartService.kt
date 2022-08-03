@@ -72,25 +72,16 @@ class WearCounterpartService : LifecycleService() {
     val hr: MutableState<Int> = mutableStateOf(0)
     val isHrSensorOn: MutableState<Boolean> = mutableStateOf(false)
 
-    // Use an alarm to wake up the app and flush the sensor, typically at the 5s interval
-    private val ALARM_INTERVAL_MS = 5000L
-    private val alarmManager by lazy { getSystemService(ALARM_SERVICE) as AlarmManager }
-    private val alarmListener = object: AlarmManager.OnAlarmListener {
-        override fun onAlarm() {
-            Log.i(TAG, "RTC wakeup alarm")
-            heartRateSensor.flush()
-            Log.i(TAG, "Sending: ${heartRateSensor.latestValue}")
-            // Write the value to the [Channel] for transmission to the phone. In this
-            // basic example, HR is written to the [Channel] as a simple [Int] value which
-            // is read on the other side. It might be better to send some kind of structure
-            // like using protobuf.
-            hrOutputStream?.write(heartRateSensor.latestValue)
-            // Update the state value which is used locally on the watch in the UI.
-            hr.value = heartRateSensor.latestValue
-            setNextAlarm()
-        }
+    private val onSendBlock = { latestValue: Int ->
+        Log.i(TAG, "Sending: ${latestValue}")
+        // Write the value to the [Channel] for transmission to the phone. In this
+        // basic example, HR is written to the [Channel] as a simple [Int] value which
+        // is read on the other side. It might be better to send some kind of structure
+        // like using protobuf.
+        hrOutputStream?.write(latestValue)
+        // Update the state value which is used locally on the watch in the UI.
+        hr.value = latestValue
     }
-    private val handler = Handler(Looper.getMainLooper())
 
     // Callback for when channels are opened or closed.
     private val channelCallback = object : ChannelClient.ChannelCallback() {
@@ -198,31 +189,14 @@ class WearCounterpartService : LifecycleService() {
         if (isHrSensorOn.value) {
             disableForeground()
             teardownHeartRateSensor()
-            cancelAlarm()
         } else {
             enableForegroundService()
             initializeHeartRateSensor()
-            setNextAlarm()
         }
     }
 
-    private fun setNextAlarm() {
-        val now = System.currentTimeMillis()
-        alarmManager.setExact(
-            AlarmManager.RTC_WAKEUP,
-            now + ALARM_INTERVAL_MS,
-            "counterpart_alarm",
-            alarmListener,
-            handler
-        )
-    }
-
-    private fun cancelAlarm() {
-        alarmManager.cancel(alarmListener)
-    }
-
     private fun initializeHeartRateSensor() {
-        heartRateSensor.start()
+        heartRateSensor.start(onSendBlock)
 
         // Once collection is enabled, the service is put into Foreground mode.
         isHrSensorOn.value = true

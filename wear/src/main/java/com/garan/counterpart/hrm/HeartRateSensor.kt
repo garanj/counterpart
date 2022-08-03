@@ -6,9 +6,9 @@ package com.garan.counterpart.hrm
  */
 abstract class HeartRateSensor {
     var latestValue = 0
+    var sendBlock: (Int) -> Unit = {}
 
-    abstract fun start()
+    abstract fun start(onSendBlock: (Int) -> Unit)
     abstract fun stop()
-    abstract fun flush()
 }
 

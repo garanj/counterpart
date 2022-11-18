@@ -28,19 +28,16 @@ class ExerciseClientHeartRateSensor @Inject constructor(
         val exerciseUpdateListener = object : ExerciseUpdateListener {
             override fun onExerciseUpdate(update: ExerciseUpdate) {
                 update.latestMetrics[DataType.HEART_RATE_BPM]?.let { dataPoints ->
-                    latestValue = dataPoints.last().value.asDouble().toInt()
+                    val latestValue = dataPoints.last().value.asDouble().toInt()
                     Log.i(TAG, "New value received from HR sensor: $latestValue (of ${dataPoints.size})")
+                    sendBlock.invoke(latestValue)
                 }
-                sendBlock.invoke(latestValue)
             }
 
             override fun onAvailabilityChanged(dataType: DataType, availability: Availability) {
                 if (dataType == DataType.HEART_RATE_BPM) {
                     val dataTypeAvailability = availability as DataTypeAvailability
                     Log.i(TAG, "HR Availability: ${dataTypeAvailability}")
-                    if (availability != DataTypeAvailability.AVAILABLE) {
-                        latestValue = 0
-                    }
                 }
             }
             override fun onLapSummary(lapSummary: ExerciseLapSummary) {}

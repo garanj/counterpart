@@ -18,6 +18,7 @@ class SensorManagerHeartRateSensor(private val context: Context) : HeartRateSens
     private val SAMPLING_PERIOD_US = 1_000_000
     private val MAX_REPORTING_LATENCY_US = 5_000_000
     private val MIN_TRANSMISSION_INTERVAL_NANO = 4_750_000_000
+    private val DEBOUNCE_INTERVAL_NANO = 1_000_000_000
 
     private val sensorManager by lazy { context.getSystemService(LifecycleService.SENSOR_SERVICE) as SensorManager }
     private val sensor by lazy { sensorManager.getDefaultSensor(Sensor.TYPE_HEART_RATE) }
@@ -38,31 +39,46 @@ class SensorManagerHeartRateSensor(private val context: Context) : HeartRateSens
      * behaviour is more consistent with REPORTING_MODE_CONTINUOUS, but it still identifies as
      * REPORTING_MODE_ON_CHANGE.
      *
-     * To meet the behaviour above, we need to handle REPORTING_MODE_ON_CHANGE and
-     * REPORTING_MODE_CONTINUOUS differently in the [onSensorChanged] callback. So
-     * [correctedReportingMode] allows us to correctly choose the appropriate behaviour on
-     * different devices.
+     * It also reports a correctedFifoReservedEventCount of 600, which suggests it can batch data,
+     * but it does not batch.
+     *
+     * To meet the behaviour above, we need to handle batched and non-batched data differently in
+     * [onSensorChanged] callback. So [correctedFifoReservedEventCount] allows us to correctly choose the
+     * appropriate behaviour on different devices.
      */
-    private val Sensor.correctedReportingMode: Int
+    private val Sensor.correctedFifoReservedEventCount : Int
         get() = if (this.vendor.contains("samsung", ignoreCase = true)
                     && this.type == TYPE_HEART_RATE) {
-            Sensor.REPORTING_MODE_CONTINUOUS
+            0
         } else {
-            this.reportingMode
+            this.fifoMaxEventCount
         }
+
+    private fun maybeSendValue(value: Int, timestamp: Long) {
+        if (sensor.correctedFifoReservedEventCount > 0) {
+            // Batching supported by sensor, so we should be receiving data at a max of
+            // every 5 seconds, but sometimes sooner. If the reading is really soon for some reason
+            // filter this out.
+            if (timestamp - lastTransmittedValueTimestamp > DEBOUNCE_INTERVAL_NANO) {
+                sendBlock.invoke(value)
+                lastTransmittedValueTimestamp = timestamp
+            }
+        } else if (sensor.correctedFifoReservedEventCount == 0) {
+            // Batching not supported by sensor
+            if (timestamp - lastTransmittedValueTimestamp > MIN_TRANSMISSION_INTERVAL_NANO) {
+                sendBlock.invoke(value)
+                lastTransmittedValueTimestamp = timestamp
+            }
+        }
+    }
 
     override fun start(onSendBlock: (Int) -> Unit) {
         sendBlock = onSendBlock
 
         listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
-                if (sensor.correctedReportingMode == REPORTING_MODE_ON_CHANGE) {
-                    sendBlock.invoke(event.values.last().toInt())
-                } else if (sensor.correctedReportingMode == REPORTING_MODE_CONTINUOUS && event.values.isNotEmpty()) {
-                    if (event.timestamp - lastTransmittedValueTimestamp > MIN_TRANSMISSION_INTERVAL_NANO) {
-                        sendBlock.invoke(event.values.last().toInt())
-                        lastTransmittedValueTimestamp = event.timestamp
-                    }
+                if (event.values.isNotEmpty()) {
+                    maybeSendValue(event.values.last().toInt(), event.timestamp)
                 }
             }
 

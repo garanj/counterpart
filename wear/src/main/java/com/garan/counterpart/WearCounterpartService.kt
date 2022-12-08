@@ -1,31 +1,31 @@
 package com.garan.counterpart
 
-import android.app.*
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.Uri
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Binder
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.util.Log
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
-import androidx.lifecycle.lifecycleScope
 import androidx.wear.ongoing.OngoingActivity
 import androidx.wear.ongoing.Status
-import com.garan.counterpart.common.Capabilities
-import com.garan.counterpart.common.Channels
+import com.garan.counterpart.common.Capabilities.wearAppRunning
 import com.garan.counterpart.hrm.HeartRateSensor
-import com.google.android.gms.wearable.*
+import com.garan.counterpart.network.HrSenderClient
+import com.google.android.gms.wearable.Wearable
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
-import java.io.OutputStream
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.ZonedDateTime
 import javax.inject.Inject
 
 /**
@@ -34,9 +34,6 @@ import javax.inject.Inject
  *     - Identifying if there is a connected phone, using [CapabilityClient]
  *     - Measuring heart rate, using the in-built sensor
  *     - Transmitting heart rate to the phone, using [ChannelClient]
- *     - Using [MessageClient] to send periodic "keepalive" messages to the phone, to show that the
- *       Wear app is still running, even if it's not collecting HR (in reality, this may be just
- *       as well or better done via another [Channel] with [ChannelClient]
  *     - Ensuring that collection and transmission can continue when the app is not being used
  *       interactively: When the user turns the heart rate collection on, this service is put into
  *       [ForegroundService] mode, which means it will keep running when the user browses away from
@@ -49,126 +46,111 @@ class WearCounterpartService : LifecycleService() {
     @Inject
     lateinit var heartRateSensor: HeartRateSensor
 
-    private val binder = LocalBinder()
+    @Inject
+    lateinit var hrSenderClient: HrSenderClient
 
-    // ChannelClient does not appear to define this constant for the reason code for a timeout.
-    private val CLOSE_REASON_TIMEOUT = 4
+    private val binder = LocalBinder()
 
     private var started = false
     private var foreground = false
 
-    // The capability that the phone app declares on the network of nodes.
-    private val capabilityUri = Uri.parse("wear://*/${Capabilities.phone}")
-
-    private lateinit var capabilityClient: CapabilityClient
-    private lateinit var channelClient: ChannelClient
-    private lateinit var messageClient: MessageClient
-
-    private var hrChannel: ChannelClient.Channel? = null
-    private var hrOutputStream: OutputStream? = null
-
-    val capablePhoneNodeId: MutableStateFlow<String?> = MutableStateFlow(null)
+    val networkState = mutableStateOf(CurrentNetworkState.UNKNOWN)
 
     val hr: MutableState<Int> = mutableStateOf(0)
     val isHrSensorOn: MutableState<Boolean> = mutableStateOf(false)
 
+    private val connectivityManager by lazy { getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager }
+
+    private val capabilityClient by lazy { Wearable.getCapabilityClient(this) }
+
     private val onSendBlock = { latestValue: Int ->
-        Log.i(TAG, "Sending: ${latestValue}")
+        Log.i(TAG, "Sending: $latestValue")
         // Write the value to the [Channel] for transmission to the phone. In this
         // basic example, HR is written to the [Channel] as a simple [Int] value which
         // is read on the other side. It might be better to send some kind of structure
         // like using protobuf.
-        hrOutputStream?.write(latestValue)
+        hrSenderClient.sendValue(latestValue)
         // Update the state value which is used locally on the watch in the UI.
         hr.value = latestValue
     }
 
-    // Callback for when channels are opened or closed.
-    private val channelCallback = object : ChannelClient.ChannelCallback() {
-        override fun onChannelClosed(channel: ChannelClient.Channel, reason: Int, appCode: Int) {
-            if (channel.path == Channels.hrChannel) {
-                hrOutputStream = null
-                hrChannel = null
 
-                if (isHrSensorOn.value && reason == CLOSE_REASON_DISCONNECTED) {
-                    // In this basic example, if the channel gets disconnected and it's not for
-                    // normal reasons, then simply try to re-establish it. In reality, perhaps you'd
-                    // want better logic
-                    initializeHrChannel()
-                } else if (reason == CLOSE_REASON_TIMEOUT) {
-                    // Connection timeout - probably the app isn't running on the phone-side - which
-                    // is something that could be established in advance by some other means, e.g.
-                    // via MessageClient or another Channel.
-                    // Ideally, it might be worth indicating this timeout to the user and giving
-                    // options for what to do.
-                }
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            val capabilities = connectivityManager.getNetworkCapabilities(network)
+            capabilities?.let {
+                updateNetworkState(network, it)
             }
         }
 
-        override fun onOutputClosed(channel: ChannelClient.Channel, p1: Int, p2: Int) {
-            hrOutputStream = null
+        override fun onCapabilitiesChanged(
+            network: Network,
+            networkCapabilities: NetworkCapabilities
+        ) {
+            super.onCapabilitiesChanged(network, networkCapabilities)
+            updateNetworkState(network, networkCapabilities)
         }
 
-        // When connection was established from the phone side
-        override fun onChannelOpened(channel: ChannelClient.Channel) {
-            lifecycleScope.launch {
-                hrChannel = channel
-                hrOutputStream = channelClient.getOutputStream(channel).await()
-                // Write an initial value to inform the other end that connection is established
-                hrOutputStream?.write(0)
-            }
+        override fun onLost(network: Network) {
+            super.onLost(network)
+            updateNetworkState(network, isActive = false)
+        }
+
+        override fun onUnavailable() {
+            super.onUnavailable()
+            updateNetworkState(isActive = false)
         }
     }
 
-    private val capabilityChangedListener = object : CapabilityClient.OnCapabilityChangedListener {
-        /**
-         * Called when the capability changes on the node network, e.g. a new device added that has the
-         * app installed, or an existing device has the app installed etc.
-         */
-        override fun onCapabilityChanged(capabilityInfo: CapabilityInfo) {
-            capablePhoneNodeId.value = capabilityInfo.nodes.firstOrNull()?.id
+    fun updateNetworkState(
+        network: Network? = null,
+        capabilities: NetworkCapabilities? = null,
+        isActive: Boolean = true
+    ) {
+        val isBluetooth =
+            capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) ?: false
+        val isWifi = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ?: false
+        val hasInternet =
+            capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ?: false
+
+        networkState.value = if (network != null) {
+            CurrentNetworkState(
+                updateTime = ZonedDateTime.now(),
+                network = network.networkHandle,
+                isActive = isActive,
+                isBluetooth = isBluetooth,
+                isWifi = isWifi,
+                hasInternet = hasInternet
+            )
+        } else CurrentNetworkState.UNKNOWN
+    }
+
+    data class CurrentNetworkState(
+        val network: Long,
+        val updateTime: ZonedDateTime,
+        val hasInternet: Boolean,
+        val isWifi: Boolean,
+        val isBluetooth: Boolean,
+        val isActive: Boolean
+    ) {
+        companion object {
+            val UNKNOWN = CurrentNetworkState(
+                network = 0,
+                updateTime = ZonedDateTime.ofInstant(Instant.EPOCH, ZoneOffset.UTC),
+                hasInternet = false,
+                isWifi = false,
+                isActive = false,
+                isBluetooth = false
+            )
         }
     }
+
 
     override fun onCreate() {
         super.onCreate()
-        capabilityClient = Wearable.getCapabilityClient(this)
-        channelClient = Wearable.getChannelClient(this)
-        messageClient = Wearable.getMessageClient(this)
+        capabilityClient.addLocalCapability(wearAppRunning)
 
-        lifecycleScope.launch {
-            // If there is a phone on the node network with the app installed, start the [Channel]
-            // which will be used for sending the HR values when sensor is on, but also allows the
-            // phone to know when the app is running on the Wear app.
-            capablePhoneNodeId.collect { nodeId ->
-                if (nodeId != null) {
-                    initializeHrChannel()
-                } else {
-                    tearDownHrChannel()
-                }
-            }
-        }
-
-        lifecycleScope.launch {
-            capabilityClient.addListener(
-                capabilityChangedListener,
-                capabilityUri,
-                CapabilityClient.FILTER_REACHABLE
-            ).await()
-        }
-
-        lifecycleScope.launch {
-            channelClient.registerChannelCallback(channelCallback).await()
-        }
-        // This service implements [OnCapabilityChangedListener], so any change on the node network
-        // e.g. a phone being turned on with the app installed, or a phone installing the app will
-        // result in an event. However, on initial start up, it is necessary to query the current
-        // capabilities of the node network to see if there is a phone already present with the app
-        // installed.
-        lifecycleScope.launch {
-            queryForCapability()
-        }
-
+        connectivityManager.registerDefaultNetworkCallback(networkCallback)
         Log.i(TAG, "Service onCreate")
     }
 
@@ -177,6 +159,7 @@ class WearCounterpartService : LifecycleService() {
 
         if (!started) {
             started = true
+            enableForegroundService()
         }
         Log.i(TAG, "service onStartCommand")
         return START_STICKY
@@ -196,65 +179,28 @@ class WearCounterpartService : LifecycleService() {
     }
 
     private fun initializeHeartRateSensor() {
+        hrSenderClient.connect()
         heartRateSensor.start(onSendBlock)
 
         // Once collection is enabled, the service is put into Foreground mode.
         isHrSensorOn.value = true
     }
 
-    /**
-     * Creates a [Channel] in [OutputStream] mode for transmission of HR data to the phone, if a
-     * channel is not already established.
-     */
-    private fun initializeHrChannel() {
-        if (hrChannel == null) {
-            capablePhoneNodeId.value?.let { nodeId ->
-                lifecycleScope.launch(Dispatchers.IO) {
-                    hrChannel = channelClient.openChannel(nodeId, Channels.hrChannel).await()
-                    hrChannel?.let { channel ->
-                        hrOutputStream = channelClient.getOutputStream(channel).await()
-                        Log.i(TAG, "Set up channel to node: $nodeId")
-                    }
-                }
-            }
-        }
-    }
-
-    private fun tearDownHrChannel() {
-        hrChannel?.let { channel ->
-            lifecycleScope.launch {
-                channelClient.close(channel).await()
-                hrChannel = null
-                hrOutputStream = null
-            }
-        }
-    }
+    private fun tearDownHrChannel() = hrSenderClient.disconnect()
 
     private fun teardownHeartRateSensor() {
-        hrOutputStream?.write(0)
+        hrSenderClient.sendValue(0)
         heartRateSensor.stop()
         isHrSensorOn.value = false
         hr.value = 0
     }
 
-    /**
-     * Checks for whether there is a phone on the node network that has the app installed (though
-     * not necessarily running), and assigns it to the [capablePhoneNodeId] variable.
-     */
-    private suspend fun queryForCapability() {
-        capablePhoneNodeId.value = checkForPoweredOnInstalledNode()
+    override fun onDestroy() {
+        super.onDestroy()
+        capabilityClient.removeLocalCapability(wearAppRunning)
+        connectivityManager.unregisterNetworkCallback(networkCallback)
     }
 
-    /**
-     * Checks for a phone with the app installed. If one is found, the ID is returned as a string
-     * otherwise null.
-     */
-    private suspend fun checkForPoweredOnInstalledNode(): String? {
-        val capabilityInfo = Wearable.getCapabilityClient(this)
-            .getCapability(Capabilities.phone, CapabilityClient.FILTER_REACHABLE)
-            .await()
-        return capabilityInfo.nodes.firstOrNull()?.id
-    }
 
     override fun onBind(intent: Intent): IBinder {
         super.onBind(intent)
@@ -277,13 +223,10 @@ class WearCounterpartService : LifecycleService() {
 
     private fun maybeStopService() {
         if (!isHrSensorOn.value) {
+            Log.i(TAG, "Stopping everything")
             tearDownHrChannel()
             disableForeground()
-            lifecycleScope.launch(Dispatchers.IO) {
-                channelClient.unregisterChannelCallback(channelCallback)
-                capabilityClient.removeListener(capabilityChangedListener)
-                stopSelf()
-            }
+            stopSelf()
         }
     }
 

@@ -5,4 +5,5 @@ package com.garan.counterpart.common
 object Capabilities {
     const val phone = "counterpart_phone_capability"
     const val wear = "counterpart_wear_capability"
+    const val wearAppRunning = "counterpart_wear_running"
 }

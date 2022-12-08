@@ -2,9 +2,10 @@ apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 apply plugin: 'dagger.hilt.android.plugin'
 apply plugin: 'kotlin-kapt'
+apply plugin: 'com.google.protobuf'
 
 android {
-    compileSdkVersion 32
+    compileSdkVersion 33
     buildToolsVersion "30.0.3"
     defaultConfig {
         applicationId "com.garan.counterpart"
@@ -26,7 +27,7 @@ android {
         compose = true
     }
     composeOptions {
-        kotlinCompilerExtensionVersion = "1.2.0"
+        kotlinCompilerExtensionVersion = "1.4.0-alpha02"
     }
     kotlinOptions {
         jvmTarget = "1.8"
@@ -41,16 +42,16 @@ android {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
         }
     }
+    namespace 'com.garan.counterpart'
 }
 
-dependencies {
-    implementation fileTree(dir: 'libs', include: ['*.jar'])
 
+dependencies {
     implementation project(":common")
 
     // Required for activity
-    implementation "androidx.core:core-ktx:1.8.0"
-    implementation "androidx.activity:activity-compose:1.5.1"
+    implementation "androidx.core:core-ktx:1.9.0"
+    implementation "androidx.activity:activity-compose:1.6.1"
 
     // Required for Wear Compose
     implementation "androidx.wear.compose:compose-foundation:$wear_compose_version"
@@ -65,31 +66,72 @@ dependencies {
 
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlin_version"
     implementation "androidx.wear:wear:1.2.0"
-    implementation "androidx.fragment:fragment-ktx:1.5.0"
+    implementation "androidx.fragment:fragment-ktx:1.5.4"
 
     // Ongoing activity
     implementation "androidx.wear:wear-ongoing:1.0.0"
 
     // Required for the service
-    implementation "androidx.lifecycle:lifecycle-livedata-ktx:2.5.0"
-    implementation "androidx.lifecycle:lifecycle-service:2.5.0"
+    implementation "androidx.lifecycle:lifecycle-livedata-ktx:2.5.1"
+    implementation "androidx.lifecycle:lifecycle-service:2.5.1"
 
     // Hilt
-    implementation "com.google.dagger:hilt-android:2.42"
-    kapt "com.google.dagger:hilt-android-compiler:2.42"
+    implementation "com.google.dagger:hilt-android:2.44"
+    kapt "com.google.dagger:hilt-android-compiler:2.44"
     kapt("androidx.hilt:hilt-compiler:1.0.0")
 
     // For DataLayer comms Wear <-> Phone
-    implementation "com.google.android.gms:play-services-wearable:17.1.0"
+    implementation "com.google.android.gms:play-services-wearable:18.0.0"
 
     // For permissions in compose
     implementation "com.google.accompanist:accompanist-permissions:0.24.9-beta"
 
-    // Health Services
-    implementation "androidx.health:health-services-client:1.0.0-alpha03"
-    implementation "com.google.guava:guava:31.1-android"
-    implementation "androidx.concurrent:concurrent-futures-ktx:1.1.0"
-
     // For Task coroutine support
     implementation "org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.6.4"
+
+    implementation "com.google.android.horologist:horologist-composables:0.2.0"
+    implementation "com.google.android.horologist:horologist-compose-layout:0.2.0"
+
+    // gRPC
+    api "io.grpc:grpc-stub:$grpc_version"
+    api "io.grpc:grpc-protobuf-lite:$grpc_version"
+    api "io.grpc:grpc-android:$grpc_version"
+    api "io.grpc:grpc-kotlin-stub:$grpc_kotlin_version"
+    api "com.google.protobuf:protobuf-kotlin-lite:$protobuf_version"
+
+    runtimeOnly("io.grpc:grpc-okhttp:$grpc_version")
+}
+
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:$protobuf_version"
+    }
+    plugins {
+        grpc {
+            artifact = "io.grpc:protoc-gen-grpc-java:$grpc_version"
+        }
+        grpckt {
+            artifact = "io.grpc:protoc-gen-grpc-kotlin:$grpc_kotlin_version:jdk8@jar"
+        }
+    }
+    generateProtoTasks {
+        all().each { task ->
+            task.builtins {
+                java {
+                    option "lite"
+                }
+                kotlin {
+                    option "lite"
+                }
+            }
+            task.plugins {
+                grpc {
+                    option "lite"
+                }
+                grpckt {
+                    option "lite"
+                }
+            }
+        }
+    }
 }

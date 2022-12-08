@@ -1,10 +1,11 @@
 package com.garan.counterpart
 
 import android.content.Context
-import android.util.Log
-import com.garan.counterpart.hrm.ExerciseClientHeartRateSensor
 import com.garan.counterpart.hrm.HeartRateSensor
 import com.garan.counterpart.hrm.SensorManagerHeartRateSensor
+import com.garan.counterpart.network.DataLayerHrSenderClient
+import com.garan.counterpart.network.GrpcHrSenderClient
+import com.garan.counterpart.network.HrSenderClient
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -16,11 +17,8 @@ import kotlinx.coroutines.SupervisorJob
 import javax.inject.Provider
 import javax.inject.Singleton
 
-/**
- * Counterpart can use either Health Services for measuring heart rate or SensorManager. Specify
- * which one should be injected.
- */
-const val useHealthServices = false
+
+const val useGrpc = true
 
 @Module
 @InstallIn(SingletonComponent::class)
@@ -33,13 +31,17 @@ class ProviderModule {
     @Singleton
     @Provides
     fun providesHeartRateSensor(
+        @ApplicationContext appContext: Context
+    ): HeartRateSensor = SensorManagerHeartRateSensor(appContext)
+
+    @Singleton
+    @Provides
+    fun providesHrSender(
         @ApplicationContext appContext: Context,
         coroutineScopeProvider: Provider<CoroutineScope>
-    ): HeartRateSensor = if (useHealthServices) {
-        Log.i(TAG, "Using health services")
-        ExerciseClientHeartRateSensor(appContext, coroutineScopeProvider.get())
+    ): HrSenderClient = if (useGrpc) {
+        GrpcHrSenderClient(appContext, coroutineScopeProvider.get())
     } else {
-        Log.i(TAG, "Using sensor manager")
-        SensorManagerHeartRateSensor(appContext)
+        DataLayerHrSenderClient(appContext, coroutineScopeProvider.get())
     }
 }

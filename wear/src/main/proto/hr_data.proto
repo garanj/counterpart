@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+option java_package = "com.garan.counterpart";
+option java_multiple_files = true;
+
+message HrMessage{
+  uint32 hr_value = 1;
+}
+
+message HrResult {
+  bool result = 1;
+};
+
+service HrService {
+  rpc sendHr (HrMessage) returns (HrResult);
+};

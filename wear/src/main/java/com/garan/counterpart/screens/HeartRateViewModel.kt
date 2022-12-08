@@ -14,7 +14,6 @@ import com.garan.counterpart.TAG
 import com.garan.counterpart.WearCounterpartService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.flow.StateFlow
 import javax.inject.Inject
 
 
@@ -40,9 +39,9 @@ class HeartRateViewModel @Inject constructor(
             binder.getService().let {
                 counterpartService = it
                 serviceState.value = ServiceState.Connected(
-                    connectedNodeId = it.capablePhoneNodeId,
                     hr = it.hr,
-                    isHrSensorOn = it.isHrSensorOn
+                    isHrSensorOn = it.isHrSensorOn,
+                    networkState = it.networkState
                 )
             }
             Log.i(TAG, "onServiceConnected")
@@ -65,7 +64,7 @@ class HeartRateViewModel @Inject constructor(
 
     private fun createService() {
         Intent(applicationContext, WearCounterpartService::class.java).also { intent ->
-            applicationContext.startService(intent)
+            applicationContext.startForegroundService(intent)
             applicationContext.bindService(intent, connection, Context.BIND_AUTO_CREATE)
         }
     }
@@ -87,8 +86,8 @@ sealed class ServiceState {
     // When the service is connected, the [Connected] subclass provides state holders that can be
     // used in compose to react to change, e.g. change in connected device, change in HR etc.
     data class Connected(
-        val connectedNodeId: StateFlow<String?>,
         val hr: State<Int>,
-        val isHrSensorOn: State<Boolean>
+        val isHrSensorOn: State<Boolean>,
+        val networkState: State<WearCounterpartService.CurrentNetworkState>
     ) : ServiceState()
 }

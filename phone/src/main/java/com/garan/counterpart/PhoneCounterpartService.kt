@@ -68,12 +68,18 @@ class PhoneCounterpartService : LifecycleService() {
     // Listens for changes on the node network for any devices running the Wear app. In this simple
     // example, this phone app simply takes the first Wear app device on the network that is running
     // the wear app, and does not deal with the scenario where there may be more than one.
-    private val capabilityChangedListener = object : CapabilityClient.OnCapabilityChangedListener {
+    private val capableDeviceListener = object : CapabilityClient.OnCapabilityChangedListener {
         override fun onCapabilityChanged(capabilityInfo: CapabilityInfo) {
             connectedHeartRateSensorNodeId = capabilityInfo.nodes.firstOrNull()?.id
             lifecycleScope.launch {
                 installedStatus.value = checkNodeForInstall()
             }
+        }
+    }
+
+    private val runningStatusListener = object : CapabilityClient.OnCapabilityChangedListener {
+        override fun onCapabilityChanged(capabilityInfo: CapabilityInfo) {
+            appActiveStatus.value = capabilityInfo.nodes.isNotEmpty()
         }
     }
 
@@ -91,7 +97,6 @@ class PhoneCounterpartService : LifecycleService() {
 
         override fun onChannelClosed(channel: ChannelClient.Channel, p1: Int, p2: Int) {
             if (channel.path == Channels.hrChannel) {
-                appActiveStatus.value = false
                 hrInputJob?.cancel()
                 hrInputStream = null
                 hr.value = 0
@@ -142,8 +147,17 @@ class PhoneCounterpartService : LifecycleService() {
         messageClient = Wearable.getMessageClient(this)
         lifecycleScope.launch {
             capabilityClient.addListener(
-                capabilityChangedListener,
+                capableDeviceListener,
                 capabilityUri,
+                CapabilityClient.FILTER_REACHABLE
+            ).await()
+        }
+
+        val runningUri = Uri.parse("wear://*/${Capabilities.wearAppRunning}")
+        lifecycleScope.launch {
+            capabilityClient.addListener(
+                runningStatusListener,
+                runningUri,
                 CapabilityClient.FILTER_REACHABLE
             ).await()
         }
@@ -187,7 +201,7 @@ class PhoneCounterpartService : LifecycleService() {
     }
 
     private suspend fun checkForPoweredOnInstalledNode() =
-        suspendCoroutine<String?> { continuation ->
+        suspendCoroutine { continuation ->
             Wearable.getCapabilityClient(this)
                 .getCapability(Capabilities.wear, CapabilityClient.FILTER_REACHABLE)
                 .addOnCompleteListener { task ->
@@ -195,7 +209,7 @@ class PhoneCounterpartService : LifecycleService() {
                 }
         }
 
-    private suspend fun checkForPoweredOnNode() = suspendCoroutine<String?> { continuation ->
+    private suspend fun checkForPoweredOnNode() = suspendCoroutine { continuation ->
         Wearable.getNodeClient(this)
             .connectedNodes
             .addOnCompleteListener { task ->
@@ -232,7 +246,8 @@ class PhoneCounterpartService : LifecycleService() {
 
     private fun maybeStopService() {
         lifecycleScope.launch {
-            capabilityClient.removeListener(capabilityChangedListener)
+            capabilityClient.removeListener(capableDeviceListener)
+            capabilityClient.removeListener(runningStatusListener)
             channelClient.unregisterChannelCallback(channelCallback)
             stopSelf()
         }

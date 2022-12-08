@@ -2,3 +2,13 @@ include ':wear'
 rootProject.name='Counterpart'
 include ':phone'
 include ':common'
+
+import org.gradle.api.initialization.resolve.RepositoriesMode
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}

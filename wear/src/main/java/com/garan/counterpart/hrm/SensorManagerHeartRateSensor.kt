@@ -2,14 +2,10 @@ package com.garan.counterpart.hrm
 
 import android.content.Context
 import android.hardware.Sensor
-import android.hardware.Sensor.REPORTING_MODE_CONTINUOUS
-import android.hardware.Sensor.REPORTING_MODE_ON_CHANGE
 import android.hardware.Sensor.TYPE_HEART_RATE
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import androidx.lifecycle.LifecycleService
 import com.garan.counterpart.TAG
@@ -21,13 +17,10 @@ class SensorManagerHeartRateSensor(private val context: Context) : HeartRateSens
     private val DEBOUNCE_INTERVAL_NANO = 1_000_000_000
 
     private val sensorManager by lazy { context.getSystemService(LifecycleService.SENSOR_SERVICE) as SensorManager }
-    private val sensor by lazy { sensorManager.getDefaultSensor(Sensor.TYPE_HEART_RATE) }
+    private val sensor by lazy { sensorManager.getDefaultSensor(TYPE_HEART_RATE) }
     private var listener: SensorEventListener? = null
 
-    private val handler = Handler(Looper.getMainLooper())
-
     private var lastTransmittedValueTimestamp = 0L
-
 
     /**
      * HR sensors should be onChange sensors. We only want to transmit the HR to the phone when it
@@ -46,9 +39,10 @@ class SensorManagerHeartRateSensor(private val context: Context) : HeartRateSens
      * [onSensorChanged] callback. So [correctedFifoReservedEventCount] allows us to correctly choose the
      * appropriate behaviour on different devices.
      */
-    private val Sensor.correctedFifoReservedEventCount : Int
+    private val Sensor.correctedFifoReservedEventCount: Int
         get() = if (this.vendor.contains("samsung", ignoreCase = true)
-                    && this.type == TYPE_HEART_RATE) {
+            && this.type == TYPE_HEART_RATE
+        ) {
             0
         } else {
             this.fifoMaxEventCount
@@ -61,6 +55,7 @@ class SensorManagerHeartRateSensor(private val context: Context) : HeartRateSens
             // filter this out.
             if (timestamp - lastTransmittedValueTimestamp > DEBOUNCE_INTERVAL_NANO) {
                 sendBlock.invoke(value)
+                Log.i(TAG, "Time: ${System.currentTimeMillis()} value: $value")
                 lastTransmittedValueTimestamp = timestamp
             }
         } else if (sensor.correctedFifoReservedEventCount == 0) {
@@ -77,6 +72,7 @@ class SensorManagerHeartRateSensor(private val context: Context) : HeartRateSens
 
         listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
+                event.accuracy
                 if (event.values.isNotEmpty()) {
                     maybeSendValue(event.values.last().toInt(), event.timestamp)
                 }
@@ -89,7 +85,12 @@ class SensorManagerHeartRateSensor(private val context: Context) : HeartRateSens
 
         listener?.let {
             Log.i(TAG, "Enabling HR sensor")
-            sensorManager.registerListener(listener, sensor, SAMPLING_PERIOD_US, MAX_REPORTING_LATENCY_US)
+            sensorManager.registerListener(
+                listener,
+                sensor,
+                SAMPLING_PERIOD_US,
+                MAX_REPORTING_LATENCY_US
+            )
         }
     }
 

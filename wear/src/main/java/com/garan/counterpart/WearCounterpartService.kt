@@ -186,7 +186,6 @@ class WearCounterpartService : LifecycleService() {
         isHrSensorOn.value = true
     }
 
-
     private fun tearDownHrChannel() = hrSenderClient.disconnect()
 
     private fun teardownHeartRateSensor() {
